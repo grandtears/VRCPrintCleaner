@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- ツールバーアイコン用の小窓。中身の数字やエラーは popup.js が埋める。 -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="popup">
+    <h1>Print Cleaner for VRChat</h1>
+
+    <!-- 現在の枚数 / 削除開始の枚数。下のバーは割合。 -->
+    <div>
+      <div class="count"><span id="count">-</span> <small>/ <span id="limit">64</span> 枚</small></div>
+      <div class="bar"><div id="bar" style="width:0"></div></div>
+    </div>
+
+    <!-- 自動削除のオン/オフ。ドライラン中だけ dryRunTag を表示する。 -->
+    <label class="switch">
+      <input type="checkbox" id="enabled">
+      <span class="track"></span>
+      <span>自動削除</span>
+      <span id="dryRunTag" class="warn" hidden>（ドライラン）</span>
+    </label>
+
+    <!-- 最終チェック時刻。エラー時は status の下に error を出す。 -->
+    <div id="status" class="muted">-</div>
+    <div id="error" class="error" hidden></div>
+
+    <div class="row">
+      <button id="runNow" class="primary">今すぐチェック</button>
+      <button id="openManager">一覧・設定</button>
+    </div>
+  </div>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

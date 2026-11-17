@@ -1,0 +1,103 @@
+/* ポップアップと一覧ページで共有するスタイル。色は CSS 変数に寄せて、JS からも var(--danger) などで参照する。 */
+:root {
+  --bg: #0f1117;      /* ページ背景 */
+  --panel: #181b24;   /* パネル */
+  --panel2: #20242f;  /* カード・入力欄 */
+  --line: #2c3140;    /* 枠線・区切り */
+  --text: #e6e8ee;
+  --muted: #9aa1b2;   /* 補足テキスト */
+  --accent: #4f8cff;  /* 主要ボタン、枚数に余裕があるときのバー */
+  --danger: #ef4444;  /* 上限到達、次に削除されるカード */
+  --warn: #f59e0b;    /* ドライラン表示、注意書き */
+  --star: #fbbf24;    /* 保護中の金枠 */
+  --ok: #22c55e;      /* オンになっているトグル */
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+}
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+input[type=number] {
+  width: 70px; font: inherit; color: var(--text);
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px;
+}
+a { color: var(--accent); }
+.muted { color: var(--muted); }
+.error { color: var(--danger); }
+.warn { color: var(--warn); }
+
+/* トグルスイッチ。チェックボックス本体は隠し、隣の .track をスイッチに見せる。 */
+.switch { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.switch input { display: none; }
+.switch .track {
+  width: 36px; height: 20px; border-radius: 10px; background: var(--line); position: relative; transition: .15s;
+  flex-shrink: 0;
+}
+.switch .track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; transition: .15s;
+}
+.switch input:checked + .track { background: var(--ok); }
+.switch input:checked + .track::after { left: 18px; }
+
+/* ツールバーの小窓。幅を固定して、Chrome のポップアップサイズを安定させる。 */
+.popup { width: 300px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.popup h1 { font-size: 14px; margin: 0; }
+.count { font-size: 28px; font-weight: 700; letter-spacing: .5px; }
+.count small { font-size: 14px; color: var(--muted); font-weight: 400; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); }
+.row { display: flex; gap: 8px; }
+.row > button { flex: 1; }
+
+/* 一覧ページ。左にカード、右に設定。900px 未満では1列に畳む。 */
+.page { max-width: 1200px; margin: 0 auto; padding: 24px; }
+.page header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.page h1 { font-size: 20px; margin: 0; }
+.panels { display: grid; grid-template-columns: 1fr 320px; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .panels { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.panel h2 { font-size: 14px; margin: 0 0 12px; }
+.settings label.field { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; }
+.settings .switch { padding: 6px 0; justify-content: space-between; }
+.settings .hint { font-size: 11px; color: var(--muted); margin: -2px 0 6px; }
+.summary { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.summary b { font-size: 16px; }
+
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; }
+.card {
+  background: var(--panel2); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; position: relative;
+}
+.card.protected { border-color: var(--star); } /* ★で保護中 */
+.card.next { border-color: var(--danger); }    /* 次の実行で削除される */
+.card .thumb { aspect-ratio: 1.42 / 1; background: #000 center/cover no-repeat; display: block; width: 100%; }
+.card .meta { padding: 8px 10px; font-size: 11px; }
+.card .meta .world { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .star {
+  position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; padding: 0; border-radius: 50%;
+  background: rgba(0,0,0,.6); border: none; font-size: 18px; line-height: 32px; color: #888;
+}
+.card.protected .star { color: var(--star); }
+.card .order {
+  position: absolute; top: 8px; left: 8px; font-size: 11px; padding: 2px 7px; border-radius: 10px;
+  background: rgba(0,0,0,.65); color: var(--muted);
+}
+.card.next .order { background: var(--danger); color: #fff; }
+.logs { max-height: 320px; overflow: auto; font-size: 11px; font-family: ui-monospace, Consolas, monospace; }
+.logs div { padding: 3px 0; border-bottom: 1px solid var(--line); }
+.notice { background: var(--panel2); border-left: 3px solid var(--warn); padding: 8px 10px; border-radius: 6px; font-size: 12px; }

@@ -1,0 +1,63 @@
+<!doctype html>
+<!-- 拡張の設定ページ。プリント一覧・保護・設定・ログ。描画は manager.js。 -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <title>Print Cleaner for VRChat</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>Print Cleaner for VRChat</h1>
+      <div class="row">
+        <!-- reload は一覧の再取得だけ。runNow は削除判定まで background に頼む。 -->
+        <button id="reload">一覧を再読み込み</button>
+        <button id="runNow" class="primary">今すぐチェック</button>
+      </div>
+    </header>
+
+    <div class="panels">
+      <!-- 左: プリントのカード。中身は空で、manager.js が1枚ずつ足す。 -->
+      <section class="panel">
+        <div class="summary">
+          <span><b id="count">-</b> <span class="muted">/ <span id="limit">64</span> 枚</span></span>
+          <span>★保護 <b id="protCount">0</b></span>
+          <span class="muted">★をクリックで保護 / 解除。赤枠は次に削除されるプリントです。</span>
+        </div>
+        <div id="listError" class="notice" hidden></div>
+        <div id="grid" class="grid"></div>
+      </section>
+
+      <!-- 右: 設定、ログ、注意書き。狭い画面では CSS で下に回る。 -->
+      <aside style="display:flex;flex-direction:column;gap:18px">
+        <section class="panel settings">
+          <h2>設定</h2>
+          <!-- 各 input の data-key が common.js の設定キーと一致する。change でその1つだけ保存する。 -->
+          <label class="switch"><span>自動削除</span><input type="checkbox" data-key="enabled"><span class="track"></span></label>
+          <label class="switch"><span>ドライラン（削除せず記録のみ）</span><input type="checkbox" data-key="dryRun"><span class="track"></span></label>
+          <label class="field"><span>削除開始の枚数</span><input type="number" min="1" max="64" data-key="triggerCount"></label>
+          <div class="hint">VRC+ は 64、非加入は 20 が上限</div>
+          <label class="field"><span>削除後の枚数</span><input type="number" min="0" max="63" data-key="targetCount"></label>
+          <div class="hint">余裕を持たせたいなら 60 などに</div>
+          <label class="field"><span>チェック間隔（分）</span><input type="number" min="1" max="60" data-key="intervalMinutes"></label>
+          <label class="field"><span>1回の最大削除数</span><input type="number" min="1" max="64" data-key="maxPerRun"></label>
+          <label class="switch"><span>削除前に画像を保存</span><input type="checkbox" data-key="backupBeforeDelete"><span class="track"></span></label>
+          <div class="hint">ダウンロードフォルダ/VRChatPrints/ に保存。保存失敗時は削除しません</div>
+          <label class="switch"><span>他人のプリントは削除しない</span><input type="checkbox" data-key="keepOthersPrints"><span class="track"></span></label>
+        </section>
+
+        <section class="panel">
+          <h2>ログ</h2>
+          <div id="logs" class="logs"></div>
+        </section>
+
+        <div class="notice">
+          非公式ツールです。VRChatのWebサイトと同じAPIを、ログイン中のブラウザのCookieで呼び出します。認証情報の保存や外部への送信は行いません。APIの仕様変更で動かなくなる可能性があります。
+        </div>
+      </aside>
+    </div>
+  </div>
+  <script type="module" src="manager.js"></script>
+</body>
+</html>

@@ -1,0 +1,168 @@
+// 共通の設定・ストレージ・削除対象選定ロジック
+// background.js（定期実行）/ popup.js（アイコン横の小窓）/ manager.js（一覧・設定ページ）から import される。
+// ここに置いているのは「どの画面からも同じ判断をしたいもの」だけ。API通信そのものは background.js 側。
+
+// VRChat Web の API ルート。拡張はここ以外へ通信しない。
+export const API_BASE = 'https://vrchat.com/api/1';
+
+// 初回インストール時の設定。ユーザーが画面で変えるまではこの値を使う。
+export const DEFAULT_SETTINGS = {
+  enabled: false,          // 初回は無効。確認してから有効化してもらう（誤削除防止）
+  triggerCount: 64,        // この枚数に達したら削除を始める（VRC+ の上限が 64）
+  targetCount: 63,         // 削除後、この枚数まで減らす（trigger より必ず小さくする）
+  intervalMinutes: 1,      // 何分おきに枚数を見に行くか
+  maxPerRun: 5,            // 1回の実行で消す最大枚数。バグや設定ミスで一気に消さないための上限
+  keepOthersPrints: false, // true のとき、他人が撮って自分のコレクションに入ったプリントは消さない
+  backupBeforeDelete: true,// true のとき、削除の前に画像をダウンロードフォルダへ保存する
+  dryRun: false            // true のとき、実際には削除せず「消す予定」をログに書くだけ
+};
+
+// --- 設定（chrome.storage.sync） ---
+// sync は同じ Google アカウントの Chrome 同士で共有される。
+// 容量は小さいので、設定と保護IDだけを置く。ログや最終状態は local 側。
+
+// 保存済み設定を読み、未保存のキーは初期値で埋めてから正規化する。
+export async function getSettings() {
+  const { settings } = await chrome.storage.sync.get('settings');
+  return normalizeSettings({ ...DEFAULT_SETTINGS, ...(settings || {}) });
+}
+
+// 一部のキーだけ上書きして保存する。画面のチェックボックス1つ分の変更に使う。
+export async function saveSettings(partial) {
+  const current = await getSettings();
+  const next = normalizeSettings({ ...current, ...partial });
+  await chrome.storage.sync.set({ settings: next });
+  return next;
+}
+
+// 画面から来た値を、APIや削除処理が安心して使える範囲に直す。
+// 文字列の "64" や空欄、範囲外の数値が混ざってもここで整数に落とす。
+export function normalizeSettings(s) {
+  // 数値として解釈できないときは初期値。解釈できたら min〜max に収める。
+  const int = (v, min, max, def) => {
+    const n = Math.floor(Number(v));
+    if (!Number.isFinite(n)) return def;
+    return Math.min(max, Math.max(min, n));
+  };
+  const out = { ...s };
+  out.triggerCount = int(s.triggerCount, 1, 64, DEFAULT_SETTINGS.triggerCount);
+  out.targetCount = int(s.targetCount, 0, 63, DEFAULT_SETTINGS.targetCount);
+  // 「削除後の枚数」が開始枚数以上だと、1枚も減らせず無限に条件を満たし続ける。
+  // 必ず開始枚数より1枚少なくする。
+  if (out.targetCount >= out.triggerCount) out.targetCount = out.triggerCount - 1;
+  out.intervalMinutes = int(s.intervalMinutes, 1, 60, DEFAULT_SETTINGS.intervalMinutes);
+  out.maxPerRun = int(s.maxPerRun, 1, 64, DEFAULT_SETTINGS.maxPerRun);
+  // チェックボックス由来の値を必ず true / false にする（"false" 文字列などを防ぐ）
+  for (const k of ['enabled', 'keepOthersPrints', 'backupBeforeDelete', 'dryRun']) out[k] = !!s[k];
+  return out;
+}
+
+// --- 保護（★）リスト（chrome.storage.sync、プリントIDの配列） ---
+// 「消したくないプリント」の ID だけを覚える。画像本体は保存しない。
+
+// 保護中のプリントIDを Set で返す。検索を O(1) にするため配列のまま扱わない。
+export async function getProtectedIds() {
+  const { protectedIds } = await chrome.storage.sync.get('protectedIds');
+  return new Set(Array.isArray(protectedIds) ? protectedIds : []);
+}
+
+// 1枚の保護を付ける / 外す。画面の ★ ボタンから呼ばれる。
+export async function setProtected(printId, isProtected) {
+  const set = await getProtectedIds();
+  if (isProtected) set.add(printId); else set.delete(printId);
+  await chrome.storage.sync.set({ protectedIds: [...set] });
+  return set;
+}
+
+// もう存在しないプリントの保護IDを捨てる。
+// sync ストレージは容量が小さいので、削除済み・期限切れのIDを残し続けない。
+export async function pruneProtectedIds(existingIds) {
+  const set = await getProtectedIds();
+  const exist = new Set(existingIds);
+  const next = [...set].filter((id) => exist.has(id));
+  // 変化がなければ書き込まない（不要な storage イベントと同期を避ける）
+  if (next.length !== set.size) await chrome.storage.sync.set({ protectedIds: next });
+}
+
+// --- 状態・ログ（chrome.storage.local） ---
+// local はこのブラウザだけ。枚数・エラー・ログは端末ごとに違ってよいので sync にしない。
+
+// 直近の実行結果。画面の「何枚 / 最終チェック / エラー」表示の元になる。
+export async function getState() {
+  const { state } = await chrome.storage.local.get('state');
+  return state || { lastRunAt: null, lastCount: null, lastError: null, userId: null };
+}
+
+// 状態の一部だけ上書きする。渡していないキーは前の値を残す。
+export async function setState(partial) {
+  const state = { ...(await getState()), ...partial };
+  await chrome.storage.local.set({ state });
+  return state;
+}
+
+export async function getLogs() {
+  const { logs } = await chrome.storage.local.get('logs');
+  return Array.isArray(logs) ? logs : [];
+}
+
+// 新しいログを先頭に足し、100件を超えた古い分は捨てる。
+// level は 'info' | 'warn' | 'error'。一覧画面の色分けに使う。
+export async function addLog(level, message) {
+  const logs = await getLogs();
+  logs.unshift({ at: new Date().toISOString(), level, message });
+  await chrome.storage.local.set({ logs: logs.slice(0, 100) });
+}
+
+// --- プリントのユーティリティ ---
+
+// プリントの作成時刻をミリ秒で返す。APIのフィールド名が変わっても createdAt / timestamp の両方を見る。
+// 日付として読めないものは 0（最古扱い）にして、並び順が壊れないようにする。
+export function printTime(p) {
+  const t = Date.parse(p.createdAt || p.timestamp || '');
+  return Number.isFinite(t) ? t : 0;
+}
+
+// 削除は「古いものから」。元の配列は壊さない（画面は新しい順で表示したいため）。
+export function sortOldestFirst(prints) {
+  return [...prints].sort((a, b) => printTime(a) - printTime(b));
+}
+
+// この1枚を自動削除してよいか。
+// 保護中、または「他人のプリントは残す」設定で作者が自分でないものは対象外。
+export function isDeletable(p, settings, protectedSet, userId) {
+  if (protectedSet.has(p.id)) return false;
+  // authorId が無い古いデータは判定できないので、設定ONでも削除対象に残す
+  if (settings.keepOthersPrints && userId && p.authorId && p.authorId !== userId) return false;
+  return true;
+}
+
+// 消してよいプリントを古い順に並べた配列。実際に何枚消すかは selectDeletions が決める。
+export function deletionOrder(prints, settings, protectedSet, userId) {
+  return sortOldestFirst(prints).filter((p) => isDeletable(p, settings, protectedSet, userId));
+}
+
+// 今回の実行で実際に手を付けるプリントを選ぶ。
+// 枚数が開始枚数未満なら何もしない。超えていても 1回の上限（maxPerRun）まで。
+export function selectDeletions(prints, settings, protectedSet, userId) {
+  if (prints.length < settings.triggerCount) return [];
+  // 例: 64枚持っていて目標が 63 なら、1枚だけ減らせばよい
+  const need = prints.length - settings.targetCount;
+  if (need <= 0) return [];
+  return deletionOrder(prints, settings, protectedSet, userId).slice(0, Math.min(need, settings.maxPerRun));
+}
+
+// サムネイルやバックアップに使う画像URL。
+// APIが api.vrchat.cloud のURLを返すことがあるが、拡張の権限は vrchat.com だけなので
+// 同じパスを vrchat.com 側に寄せ、ログイン中の Cookie で取れるようにする。
+export function imageUrl(p) {
+  const url = p?.files?.image || '';
+  return url.replace(/^https:\/\/api\.vrchat\.cloud\/api\/1\//, `${API_BASE}/`);
+}
+
+// ISO文字列やミリ秒を「2026/11/17 17:59」の形にする。値が無ければ '-'。
+export function formatDate(t) {
+  if (!t) return '-';
+  const d = new Date(t);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
