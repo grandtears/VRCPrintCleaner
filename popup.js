@@ -1,13 +1,15 @@
 // ツールバーアイコンを押したときに出る小さい窓。
 // 枚数の確認、自動削除のオン/オフ、「今すぐチェック」、一覧ページを開く、だけを行う。
-import { getSettings, saveSettings, getState, formatDate } from './common.js';
+import { getSettings, saveSettings, getState, formatDate, ensureBackupDir } from './common.js';
 
 // getElementById の短い別名。このファイル内の要素参照はすべてこれ。
 const $ = (id) => document.getElementById(id);
+let latestSettings = null;
 
 // 保存済みの設定と直近の実行状態を読んで、ポップアップ全体を描き直す。
 async function render() {
   const [settings, state] = await Promise.all([getSettings(), getState()]);
+  latestSettings = settings;
   $('enabled').checked = settings.enabled;
   // ドライラン中だけ「（ドライラン）」を出す。hidden 属性で表示を切り替える。
   $('dryRunTag').hidden = !settings.dryRun;
@@ -52,6 +54,17 @@ $('enabled').addEventListener('change', async (e) => {
 $('runNow').addEventListener('click', async () => {
   $('runNow').disabled = true;
   $('runNow').textContent = 'チェック中…';
+  const settings = latestSettings;
+  if (settings?.enabled && settings.backupBeforeDelete && !settings.dryRun) {
+    try {
+      await ensureBackupDir();
+    } catch (e) {
+      $('runNow').disabled = false;
+      $('runNow').textContent = '今すぐチェック';
+      if (e?.name !== 'AbortError') chrome.runtime.openOptionsPage();
+      return;
+    }
+  }
   const res = await chrome.runtime.sendMessage({ type: 'runNow' });
   $('runNow').disabled = false;
   $('runNow').textContent = '今すぐチェック';

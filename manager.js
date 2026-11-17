@@ -3,7 +3,7 @@
 // API へのアクセスはせず、background.js へメッセージを送って結果をもらう。
 import {
   getSettings, saveSettings, getProtectedIds, setProtected, getLogs,
-  deletionOrder, imageUrl, printTime, formatDate
+  deletionOrder, imageUrl, printTime, formatDate, ensureBackupDir
 } from './common.js';
 
 const $ = (id) => document.getElementById(id);
@@ -26,6 +26,16 @@ async function loadSettingsForm() {
 document.querySelectorAll('[data-key]').forEach((el) => {
   el.addEventListener('change', async () => {
     const key = el.dataset.key;
+    // クリックのユーザー操作が残っているうちに、保存先フォルダの許可を取る。
+    if ((key === 'backupBeforeDelete' && el.checked) || (key === 'enabled' && el.checked && document.querySelector('[data-key="backupBeforeDelete"]').checked)) {
+      try {
+        await ensureBackupDir();
+      } catch (e) {
+        if (key === 'backupBeforeDelete' || key === 'enabled') el.checked = false;
+        if (e?.name !== 'AbortError') alert(e.message || '保存先フォルダを許可できませんでした');
+        return;
+      }
+    }
     if (key === 'enabled' && el.checked) {
       const s = await getSettings();
       // 初回有効化の確認。キャンセルしたらチェックを戻して保存しない。
@@ -169,9 +179,36 @@ async function renderLogs() {
 
 // ---------- ボタン ----------
 $('reload').addEventListener('click', loadPrints);
+async function allowBackupIfNeeded() {
+  const enabled = document.querySelector('[data-key="enabled"]').checked;
+  const backup = document.querySelector('[data-key="backupBeforeDelete"]').checked;
+  const dryRun = document.querySelector('[data-key="dryRun"]').checked;
+  if (!enabled || !backup || dryRun) return true;
+  try {
+    await ensureBackupDir();
+    return true;
+  } catch (e) {
+    if (e?.name !== 'AbortError') alert(e.message || '保存先フォルダを許可できませんでした');
+    return false;
+  }
+}
+
+$('chooseDir').addEventListener('click', async () => {
+  try {
+    await ensureBackupDir(true);
+  } catch (e) {
+    if (e?.name !== 'AbortError') alert(e.message || '保存先フォルダを許可できませんでした');
+  }
+});
+
 $('runNow').addEventListener('click', async () => {
   $('runNow').disabled = true;
   $('runNow').textContent = 'チェック中…';
+  if (!(await allowBackupIfNeeded())) {
+    $('runNow').disabled = false;
+    $('runNow').textContent = '今すぐチェック';
+    return;
+  }
   // 削除が走ったあとの枚数に合わせるため、チェック完了後に一覧を取り直す
   await chrome.runtime.sendMessage({ type: 'runNow' });
   $('runNow').disabled = false;

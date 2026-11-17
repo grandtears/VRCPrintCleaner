@@ -2,8 +2,9 @@
 // background.js（定期実行）/ popup.js（アイコン横の小窓）/ manager.js（一覧・設定ページ）から import される。
 // ここに置いているのは「どの画面からも同じ判断をしたいもの」だけ。API通信そのものは background.js 側。
 
-// VRChat Web の API ルート。拡張はここ以外へ通信しない。
-export const API_BASE = 'https://vrchat.com/api/1';
+// ドキュメント上のAPIは api.vrchat.cloud。サイト本体の vrchat.com でも同じパスが通ることがある。
+// 呼び出し順の切替は background.js。ここは画像URLの置換にだけ使う。
+export const API_BASE = 'https://api.vrchat.cloud/api/1';
 
 // 初回インストール時の設定。ユーザーが画面で変えるまではこの値を使う。
 export const DEFAULT_SETTINGS = {
@@ -151,12 +152,98 @@ export function selectDeletions(prints, settings, protectedSet, userId) {
   return deletionOrder(prints, settings, protectedSet, userId).slice(0, Math.min(need, settings.maxPerRun));
 }
 
+// VRChat の画像配信先だけを許可する。それ以外へ Cookie 付きで取りに行かない。
+export function isTrustedAssetUrl(url) {
+  try {
+    const host = new URL(url).hostname;
+    return url.startsWith('https://') && (
+      host === 'vrchat.com' || host.endsWith('.vrchat.com') ||
+      host === 'vrchat.cloud' || host.endsWith('.vrchat.cloud') ||
+      host === 'assets.vrchat.com'
+    );
+  } catch {
+    return false;
+  }
+}
+
 // サムネイルやバックアップに使う画像URL。
-// APIが api.vrchat.cloud のURLを返すことがあるが、拡張の権限は vrchat.com だけなので
-// 同じパスを vrchat.com 側に寄せ、ログイン中の Cookie で取れるようにする。
 export function imageUrl(p) {
   const url = p?.files?.image || '';
-  return url.replace(/^https:\/\/api\.vrchat\.cloud\/api\/1\//, `${API_BASE}/`);
+  return isTrustedAssetUrl(url) ? url : '';
+}
+
+// 同じ画像を、api.vrchat.cloud と vrchat.com の両方で試すための候補。
+export function imageUrlCandidates(p) {
+  const url = imageUrl(p);
+  if (!url) return [];
+  const swapped = url.includes('://api.vrchat.cloud/')
+    ? url.replace('://api.vrchat.cloud/', '://vrchat.com/')
+    : url.replace('://vrchat.com/', '://api.vrchat.cloud/');
+  return swapped === url ? [url] : [url, swapped];
+}
+
+// --- 保存先フォルダ（IndexedDB に FileSystemDirectoryHandle を置く） ---
+// chrome.downloads は「ダウンロード前に保存場所を確認する」がオンだと、saveAs:false でも
+// ファイルごとにダイアログを出す。許可済みフォルダへ直接書くと、その設定に影響されない。
+const DIR_DB = 'print-cleaner';
+const DIR_STORE = 'fs';
+let cachedBackupDir = null;
+
+function openDirDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DIR_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(DIR_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getBackupDir() {
+  const db = await openDirDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DIR_STORE, 'readonly');
+    const req = tx.objectStore(DIR_STORE).get('dir');
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function saveBackupDir(handle) {
+  cachedBackupDir = handle;
+  const db = await openDirDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(DIR_STORE, 'readwrite');
+    tx.objectStore(DIR_STORE).put(handle, 'dir');
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  return handle;
+}
+
+// 許可済みならダイアログなし。未許可、または force のときだけフォルダ選択を出す（クリック中に呼ぶ）。
+export async function ensureBackupDir(force = false) {
+  const existing = !force && (cachedBackupDir || await getBackupDir());
+  if (existing) {
+    try {
+      let perm = await existing.queryPermission({ mode: 'readwrite' });
+      if (perm === 'prompt') perm = await existing.requestPermission({ mode: 'readwrite' });
+      if (perm === 'granted') {
+        cachedBackupDir = existing;
+        return existing;
+      }
+    } catch {
+      cachedBackupDir = null;
+    }
+  }
+  if (typeof showDirectoryPicker !== 'function') {
+    throw new Error('保存先フォルダが未許可です。一覧・設定を開いて許可してください。');
+  }
+  const dir = await showDirectoryPicker({
+    id: 'VRChatPrints',
+    mode: 'readwrite',
+    startIn: 'downloads'
+  });
+  return saveBackupDir(dir);
 }
 
 // ISO文字列やミリ秒を「2026/11/17 17:59」の形にする。値が無ければ '-'。

@@ -2,13 +2,16 @@
 // 拡張の本体。ポップアップや一覧画面は「表示と設定」だけで、削除の実行はすべてここ。
 // 認証情報は一切保存しない。vrchat.com にログイン済みのブラウザCookieをそのまま使う。
 import {
-  API_BASE, getSettings, getProtectedIds, pruneProtectedIds,
-  getState, setState, addLog, selectDeletions, imageUrl, printTime
+  getSettings, getProtectedIds, pruneProtectedIds,
+  getState, setState, addLog, selectDeletions, imageUrlCandidates, isTrustedAssetUrl, printTime,
+  getBackupDir
 } from './common.js';
 
 const ALARM = 'print-check';
 const DELETE_INTERVAL_MS = 1500;   // 削除リクエスト間の待ち時間（API負荷対策）
-const DOWNLOAD_TIMEOUT_MS = 60000; // 画像保存がこの時間を超えたら失敗扱いにして、削除しない
+// 公式ドキュメントのホストが先。サイト側プロキシでも同じパスが生きている場合は次で試す。
+const API_HOSTS = ['https://api.vrchat.cloud/api/1', 'https://vrchat.com/api/1'];
+let hostOrder = [...API_HOSTS];
 
 // HTTPステータスを残したエラー。401（未ログイン）と 429（レート制限）を画面文言で分けたい。
 class ApiError extends Error {
@@ -16,13 +19,11 @@ class ApiError extends Error {
 }
 
 // ---------------- API 呼び出し ----------------
-// 1) Service Worker から直接 fetch（Cookie付き）
-// 2) 401 / 通信失敗なら、開いている vrchat.com タブの中から fetch（同一オリジンなので確実にCookieが付く）
-// Chrome の Service Worker は、サイトの Cookie が付かないことがある。そのときの逃げ道が 2)。
+// 削除の正はドキュメントどおり DELETE https://api.vrchat.cloud/api/1/prints/{printId}。
+// Service Worker から fetch すると Origin が chrome-extension:// になり、VRChat が拒否する。
+// そのため vrchat.com のページ本体（MAIN world）から呼び、Origin を https://vrchat.com にする。
 
-async function apiFetch(path, method = 'GET') {
-  const url = API_BASE + path;
-  let direct = null;
+async function fetchDirect(url, method) {
   try {
     const res = await fetch(url, {
       method,
@@ -30,44 +31,116 @@ async function apiFetch(path, method = 'GET') {
       headers: { Accept: 'application/json' },
       cache: 'no-store'       // 枚数は毎回最新が欲しいのでキャッシュしない
     });
-    direct = { ok: res.ok, status: res.status, text: await res.text() };
-    // 401 以外（成功も、404 や 429 も）はここで確定。401 だけタブ経由でもう一度試す。
-    if (direct.status !== 401) return parse(direct, 'sw');
+    return { ok: res.ok, status: res.status, text: await res.text() };
   } catch (e) {
     // ネットワーク断や CORS などで fetch 自体が落ちたとき。status 0 は「応答が無い」。
-    direct = { ok: false, status: 0, text: String(e) };
+    return { ok: false, status: 0, text: String(e) };
   }
-
-  const viaTab = await fetchViaTab(url, method);
-  if (viaTab) return parse(viaTab, 'tab');
-  // タブが無い、またはタブ内実行も失敗したときは、最初の結果をそのままエラーにする
-  return parse(direct, 'sw');
 }
 
-// 開いている vrchat.com タブのページ内で fetch する。
-// ページと API が同じオリジンなので、拡張の Service Worker より確実に Cookie が付く。
-async function fetchViaTab(url, method) {
+// 空の 200 は削除成功。HTML が 200 で返った場合はプロキシの取り違えなので失敗扱いにする。
+function isApiSuccess(result) {
+  if (!result?.ok) return false;
+  if (!result.text) return true;
+  try { JSON.parse(result.text); return true; } catch { return false; }
+}
+
+// VRChat が拡張の Origin を拒否した応答。ステータスに関係なく別経路を試す。
+function isOriginRejected(result) {
+  return typeof result?.text === 'string' && result.text.includes('Origin') && result.text.includes('not acceptable');
+}
+
+// 認証・経路・メソッド違いだけ次のホストを試す。429 や 400 は同じ失敗を繰り返さない。
+function shouldTryNext(result) {
+  if (!result || isOriginRejected(result)) return true;
+  return result.status === 0 || result.status === 401 || result.status === 403 || result.status === 404 || result.status === 405;
+}
+
+function preferHost(base) {
+  hostOrder = [base, ...hostOrder.filter((h) => h !== base)];
+}
+
+async function apiFetch(path, method = 'GET') {
+  let last = { ok: false, status: 0, text: 'APIに接続できません' };
+  for (const base of hostOrder) {
+    const url = base + path;
+    // ページ本体を先に試す。拡張の Origin は API に拒否される。
+    const viaTab = await fetchViaTab(url, method);
+    if (isApiSuccess(viaTab)) {
+      preferHost(base);
+      return parse(viaTab, 'tab');
+    }
+    if (viaTab) last = viaTab;
+    if (viaTab && !shouldTryNext(viaTab)) return parse(viaTab, 'tab');
+    const direct = await fetchDirect(url, method);
+    if (isApiSuccess(direct)) {
+      preferHost(base);
+      return parse(direct, 'sw');
+    }
+    last = direct;
+    if (!shouldTryNext(direct)) return parse(direct, 'sw');
+  }
+  return parse(last, 'sw');
+}
+
+function waitForTab(tabId) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve();
+    };
+    const listener = (id, info) => {
+      if (id === tabId && info.status === 'complete') finish();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then((tab) => {
+      if (tab.status === 'complete') finish();
+    }).catch(finish);
+    setTimeout(finish, 20000);
+  });
+}
+
+// 開いている vrchat.com を使う。無ければ背面タブを1つ開いて再利用する。
+async function ensureVrchatTab() {
   const tabs = await chrome.tabs.query({ url: 'https://vrchat.com/*' });
-  if (!tabs.length) return null;
+  if (tabs.length) {
+    const tab = tabs.find((t) => t.status === 'complete') || tabs[0];
+    if (tab.status !== 'complete') await waitForTab(tab.id);
+    return tab.id;
+  }
+  const created = await chrome.tabs.create({ url: 'https://vrchat.com/home', active: false });
+  await waitForTab(created.id);
+  return created.id;
+}
+
+// ページの MAIN world で fetch する。isolated world だと Origin が拡張のままになる。
+async function runInPage(func, args) {
   try {
+    const tabId = await ensureVrchatTab();
     const [result] = await chrome.scripting.executeScript({
-      target: { tabId: tabs[0].id },
-      args: [url, method],
-      // この関数は拡張の外、タブのページ側で実行される。ここから外側の変数は見えない。
-      func: async (u, m) => {
-        try {
-          const r = await fetch(u, { method: m, credentials: 'include', headers: { Accept: 'application/json' }, cache: 'no-store' });
-          return { ok: r.ok, status: r.status, text: await r.text() };
-        } catch (e) {
-          return { ok: false, status: 0, text: String(e) };
-        }
-      }
+      target: { tabId },
+      world: 'MAIN',
+      args,
+      func
     });
     return result?.result || null;
   } catch {
-    // タブが閉じた直後や、chrome:// など注入できないページだったとき
     return null;
   }
+}
+
+async function fetchViaTab(url, method) {
+  return runInPage(async (u, m) => {
+    try {
+      const r = await fetch(u, { method: m, credentials: 'include', headers: { Accept: 'application/json' }, cache: 'no-store' });
+      return { ok: r.ok, status: r.status, text: await r.text() };
+    } catch (e) {
+      return { ok: false, status: 0, text: String(e) };
+    }
+  }, [url, method]);
 }
 
 // 応答テキストを JSON にして、失敗なら ApiError を投げる。
@@ -117,6 +190,7 @@ async function getPrints(userId) {
   return all;
 }
 
+// DELETE /prints/{printId}。成功時の本文は空。
 async function deletePrint(printId) {
   await apiFetch(`/prints/${encodeURIComponent(printId)}`, 'DELETE');
 }
@@ -137,31 +211,139 @@ function backupFilename(p) {
   return `VRChatPrints/${stamp}_${sanitize(p.worldName)}_${sanitize(p.id)}.png`;
 }
 
-// 画像のダウンロード完了を待ってから戻る。失敗・タイムアウトは例外にして、呼び出し側が削除を止める。
+function looksLikeImage(bytes) {
+  if (!bytes || bytes.length < 8) return false;
+  const png = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  const jpg = bytes[0] === 0xff && bytes[1] === 0xd8;
+  const webp = bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46;
+  return png || jpg || webp;
+}
+
+const IMAGE_URLS = [
+  'https://vrchat.com/*',
+  'https://*.vrchat.cloud/*',
+  'https://assets.vrchat.com/*'
+];
+
+// files.vrchat.cloud は Access-Control-Allow-Origin を返さない。
+// 拡張機能自身のリクエストにだけ、そのヘッダを足して画像の中身を読めるようにする。
+// 他のサイトの通信には付けない。
+let imageCorsReady = null;
+function ensureImageCors() {
+  if (!imageCorsReady) imageCorsReady = installImageCors();
+  return imageCorsReady;
+}
+
+async function installImageCors() {
+  const origin = `chrome-extension://${chrome.runtime.id}`;
+  const filters = ['||vrchat.cloud/', '||vrchat.com/'];
+  const addRules = filters.map((urlFilter, i) => ({
+    id: i + 1,
+    priority: 1,
+    action: {
+      type: 'modifyHeaders',
+      responseHeaders: [
+        { header: 'access-control-allow-origin', operation: 'set', value: origin },
+        { header: 'access-control-allow-credentials', operation: 'set', value: 'true' }
+      ]
+    },
+    condition: {
+      urlFilter,
+      resourceTypes: ['xmlhttprequest'],
+      initiatorDomains: [chrome.runtime.id]
+    }
+  }));
+  await chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: addRules.map((rule) => rule.id),
+    addRules
+  });
+}
+
+async function fetchBytes(url) {
+  await ensureImageCors();
+  try {
+    const res = await fetch(url, { credentials: 'include', cache: 'no-store' });
+    if (!res.ok) return null;
+    return new Uint8Array(await res.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+// 画像URLは api.vrchat.cloud から CloudFront などへ転送される。
+// ページ内 fetch は転送先の中身を CORS で読めないので、転送先URLだけここで拾う。
+function watchRedirects(startUrl) {
+  const fileId = startUrl.match(/file_[0-9a-f-]+/i)?.[0] || '';
+  let latest = null;
+  const listener = (details) => {
+    const chain = `${details.url}\n${latest || ''}`;
+    if (details.url === startUrl || details.url === latest || (fileId && chain.includes(fileId))) {
+      latest = details.redirectUrl;
+    }
+  };
+  chrome.webRequest.onBeforeRedirect.addListener(listener, { urls: IMAGE_URLS });
+  return () => {
+    chrome.webRequest.onBeforeRedirect.removeListener(listener);
+    return latest;
+  };
+}
+
+// タブ内 fetch の戻り値は JSON 化されるため、画像は base64 で持ち帰る。
+async function fetchBytesViaTab(url) {
+  const payload = await runInPage(async (u) => {
+    try {
+      const r = await fetch(u, { credentials: 'include', cache: 'no-store' });
+      if (!r.ok) return { ok: false, status: r.status };
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      let binary = '';
+      for (let i = 0; i < bytes.length; i += 0x1000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x1000));
+      }
+      return { ok: true, b64: btoa(binary) };
+    } catch (e) {
+      return { ok: false, status: 0, text: String(e) };
+    }
+  }, [url]);
+  if (!payload?.ok || !payload.b64) return null;
+  const bin = atob(payload.b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+async function fetchImageBytes(p) {
+  await ensureImageCors();
+  const urls = imageUrlCandidates(p);
+  if (!urls.length) throw new Error('画像URLが見つかりません');
+  for (const url of urls) {
+    const stopWatch = watchRedirects(url);
+    const viaTab = await fetchBytesViaTab(url);
+    const redirected = stopWatch();
+    if (looksLikeImage(viaTab)) return viaTab;
+    // 転送先は署名付きURLなので、拡張から直接読める。
+    for (const target of [redirected, url]) {
+      if (!isTrustedAssetUrl(target)) continue;
+      const direct = await fetchBytes(target);
+      if (looksLikeImage(direct)) return direct;
+    }
+  }
+  throw new Error('画像を取得できませんでした');
+}
+
+// 許可済みフォルダの VRChatPrints/ に直接書く。保存ダイアログは出さない。
+// 書けなかった場合は例外にして、呼び出し側が削除を止める。
 async function backupPrint(p) {
-  const url = imageUrl(p);
-  if (!url) throw new Error('画像URLが見つかりません');
-  const downloadId = await chrome.downloads.download({
-    url, filename: backupFilename(p), conflictAction: 'uniquify', saveAs: false
-    // uniquify: 同名ファイルがあれば (1) などを付けて上書きしない
-    // saveAs: false なので「名前を付けて保存」ダイアログは出さない
-  });
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { cleanup(); reject(new Error('ダウンロードがタイムアウトしました')); }, DOWNLOAD_TIMEOUT_MS);
-    // chrome.downloads.download は開始しただけで完了ではない。onChanged で完了を待つ。
-    const listener = (delta) => {
-      if (delta.id !== downloadId || !delta.state) return;
-      if (delta.state.current === 'complete') { cleanup(); resolve(); }
-      if (delta.state.current === 'interrupted') { cleanup(); reject(new Error(`ダウンロード失敗 (${delta.error?.current || 'interrupted'})`)); }
-    };
-    const cleanup = () => { clearTimeout(timer); chrome.downloads.onChanged.removeListener(listener); };
-    chrome.downloads.onChanged.addListener(listener);
-    // リスナー登録より前に完了していた場合の取りこぼし対策。search で現在状態を一度見る。
-    chrome.downloads.search({ id: downloadId }).then(([item]) => {
-      if (item?.state === 'complete') { cleanup(); resolve(); }
-      if (item?.state === 'interrupted') { cleanup(); reject(new Error(`ダウンロード失敗 (${item.error || 'interrupted'})`)); }
-    });
-  });
+  const bytes = await fetchImageBytes(p);
+  const dir = await getBackupDir();
+  if (!dir) throw new Error('保存先フォルダが未許可のため削除を中止しました。一覧・設定を開いて保存先を許可してください');
+  const perm = await dir.queryPermission({ mode: 'readwrite' });
+  if (perm !== 'granted') throw new Error('保存先フォルダの許可が切れています。一覧・設定を開いて再度許可してください');
+  const folder = await dir.getDirectoryHandle('VRChatPrints', { create: true });
+  const name = backupFilename(p).split('/').pop();
+  const file = await folder.getFileHandle(name, { create: true });
+  const stream = await file.createWritable();
+  await stream.write(bytes);
+  await stream.close();
 }
 
 // ---------------- バッジ ----------------

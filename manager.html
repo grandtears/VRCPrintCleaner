@@ -43,7 +43,8 @@
           <label class="field"><span>チェック間隔（分）</span><input type="number" min="1" max="60" data-key="intervalMinutes"></label>
           <label class="field"><span>1回の最大削除数</span><input type="number" min="1" max="64" data-key="maxPerRun"></label>
           <label class="switch"><span>削除前に画像を保存</span><input type="checkbox" data-key="backupBeforeDelete"><span class="track"></span></label>
-          <div class="hint">ダウンロードフォルダ/VRChatPrints/ に保存。保存失敗時は削除しません</div>
+          <div class="hint">許可したフォルダの VRChatPrints/ に直接保存します。Chromeの「保存場所を確認する」がオンでもダイアログは出ません。保存に失敗したプリントは削除しません。</div>
+          <button type="button" id="chooseDir">保存先フォルダを許可</button>
           <label class="switch"><span>他人のプリントは削除しない</span><input type="checkbox" data-key="keepOthersPrints"><span class="track"></span></label>
         </section>
 
