@@ -89,11 +89,32 @@ async function getMe() {
   return { userId: data.id, transport };
 }
 
-// 自分のプリント一覧。配列以外が返ったら API の形が変わったとみなして止める（誤削除防止）。
+// VRChatの一覧APIは n を省略すると10件だけ返す。上限は1リクエスト100件。
+// 64枚持っていても、パラメータなしだと先頭の10枚しか見えず、削除判定が枚数不足のままになる。
+const PRINT_PAGE_SIZE = 100;
+const PRINT_MAX_COUNT = 1000; // 応答が繰り返しても打ち切る
+
+// 自分のプリント一覧。offset を進め、短いページが来るまで結合する。
+// 配列以外が返ったら API の形が変わったとみなして止める（誤削除防止）。
 async function getPrints(userId) {
-  const { data } = await apiFetch(`/prints/user/${encodeURIComponent(userId)}`);
-  if (!Array.isArray(data)) throw new ApiError(500, 'プリント一覧の形式が想定外です（APIが変わった可能性）');
-  return data;
+  const all = [];
+  const seen = new Set();
+  for (let offset = 0; offset < PRINT_MAX_COUNT;) {
+    const { data } = await apiFetch(
+      `/prints/user/${encodeURIComponent(userId)}?n=${PRINT_PAGE_SIZE}&offset=${offset}`
+    );
+    if (!Array.isArray(data)) throw new ApiError(500, 'プリント一覧の形式が想定外です（APIが変わった可能性）');
+    for (const p of data) {
+      if (!p?.id || seen.has(p.id)) continue;
+      seen.add(p.id);
+      all.push(p);
+    }
+    if (data.length === 0) break;
+    offset += data.length;
+    // 100件未満は最後のページ。ただし n が無視されて既定の10件だけ返る場合は、次の offset をまだ見る。
+    if (data.length < PRINT_PAGE_SIZE && data.length !== 10) break;
+  }
+  return all;
 }
 
 async function deletePrint(printId) {
