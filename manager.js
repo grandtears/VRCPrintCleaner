@@ -3,7 +3,7 @@
 // API へのアクセスはせず、background.js へメッセージを送って結果をもらう。
 import {
   getSettings, saveSettings, getProtectedIds, setProtected, getLogs,
-  deletionOrder, imageUrl, printTime, formatDate, ensureBackupDir
+  deletionOrder, imageUrl, printTime, formatDate, ensureBackupDir, getBackupAccess
 } from './common.js';
 
 const $ = (id) => document.getElementById(id);
@@ -20,6 +20,30 @@ async function loadSettingsForm() {
     if (el.type === 'checkbox') el.checked = !!v; else el.value = v;
   });
   $('limit').textContent = s.triggerCount;
+  await renderDirStatus();
+}
+
+// 保存先フォルダの許可状態。切れているときはフォルダの選び直しではなく、許可の再開を案内する。
+async function renderDirStatus() {
+  const { state, name } = await getBackupAccess();
+  const el = $('dirStatus');
+  const choose = $('chooseDir');
+  const change = $('changeDir');
+  const where = name ? `（${name}）` : '';
+  change.hidden = state === 'missing';
+  if (state === 'granted') {
+    el.className = 'hint';
+    el.textContent = `保存先は許可済みです${where}。タブや Chrome を閉じたあとに再び聞かれたら、「次回以降も許可」を選んでください。`;
+    choose.textContent = '保存先へのアクセスを確認';
+  } else if (state === 'missing') {
+    el.className = 'hint';
+    el.textContent = '保存先フォルダはまだ選ばれていません。';
+    choose.textContent = '保存先フォルダを選ぶ';
+  } else {
+    el.className = 'warn';
+    el.textContent = `許可が切れています${where}。「保存先へのアクセスを再開」を押し、ダイアログで「次回以降も許可」を選ぶと、以後 Chrome やこのタブを閉じても再許可は不要です。`;
+    choose.textContent = '保存先へのアクセスを再開';
+  }
 }
 
 // フォームのどれかが変わったら、その1キーだけ保存して画面を正規化後の値で描き直す。
@@ -30,9 +54,11 @@ document.querySelectorAll('[data-key]').forEach((el) => {
     if ((key === 'backupBeforeDelete' && el.checked) || (key === 'enabled' && el.checked && document.querySelector('[data-key="backupBeforeDelete"]').checked)) {
       try {
         await ensureBackupDir();
+        await renderDirStatus();
       } catch (e) {
         if (key === 'backupBeforeDelete' || key === 'enabled') el.checked = false;
         if (e?.name !== 'AbortError') alert(e.message || '保存先フォルダを許可できませんでした');
+        await renderDirStatus();
         return;
       }
     }
@@ -186,18 +212,33 @@ async function allowBackupIfNeeded() {
   if (!enabled || !backup || dryRun) return true;
   try {
     await ensureBackupDir();
+    await renderDirStatus();
     return true;
   } catch (e) {
     if (e?.name !== 'AbortError') alert(e.message || '保存先フォルダを許可できませんでした');
+    await renderDirStatus();
     return false;
   }
 }
 
 $('chooseDir').addEventListener('click', async () => {
   try {
-    await ensureBackupDir(true);
+    const { state } = await getBackupAccess();
+    // 未選択のときだけフォルダ選択。許可が切れているときは保存済みハンドルで再開する。
+    await ensureBackupDir(state === 'missing');
+    await renderDirStatus();
   } catch (e) {
     if (e?.name !== 'AbortError') alert(e.message || '保存先フォルダを許可できませんでした');
+    await renderDirStatus();
+  }
+});
+
+$('changeDir').addEventListener('click', async () => {
+  try {
+    await ensureBackupDir(true);
+    await renderDirStatus();
+  } catch (e) {
+    if (e?.name !== 'AbortError') alert(e.message || '保存先フォルダを変更できませんでした');
   }
 });
 

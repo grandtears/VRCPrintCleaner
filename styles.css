@@ -76,6 +76,8 @@ a { color: var(--accent); }
 .settings label.field { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 0; }
 .settings .switch { padding: 6px 0; justify-content: space-between; }
 .settings .hint { font-size: 11px; color: var(--muted); margin: -2px 0 6px; }
+.settings #dirStatus { margin: 4px 0 8px; }
+.settings #changeDir { margin-top: 6px; }
 .summary { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
 .summary b { font-size: 16px; }
 

@@ -220,20 +220,53 @@ export async function saveBackupDir(handle) {
   return handle;
 }
 
-// 許可済みならダイアログなし。未許可、または force のときだけフォルダ選択を出す（クリック中に呼ぶ）。
+// Chrome は、この拡張のページ（一覧・ポップアップ）が全部閉じるとフォルダ許可を破棄する。
+// ハンドル自体は IndexedDB に残る。次に一覧タブで requestPermission すると
+// 「今回のみ / 次回以降も許可」が出る。次回以降も許可を選ぶと、タブを閉じても
+// Chrome を終了しても再許可は不要になる。今回のみだと、次に閉じたときまた切れる。
+// ポップアップにはこのダイアログを出す枠が無いので、許可の取り直しは一覧タブで行う。
+const WRITE_ACCESS = { mode: 'readwrite' };
+
+export async function getBackupAccess() {
+  const handle = cachedBackupDir || await getBackupDir();
+  if (!handle) return { state: 'missing', handle: null, name: '' };
+  let state = 'prompt';
+  try {
+    const perm = await handle.queryPermission(WRITE_ACCESS);
+    state = perm === 'granted' ? 'granted' : perm === 'denied' ? 'denied' : 'prompt';
+  } catch {
+    state = 'prompt';
+  }
+  if (state === 'granted') cachedBackupDir = handle;
+  return { state, handle, name: handle.name || '' };
+}
+
+// クリック中に呼ぶ。保存済みのフォルダに対して許可だけ取り直す。フォルダ選択は出さない。
+export async function restoreBackupAccess() {
+  const { state, handle } = await getBackupAccess();
+  if (!handle) {
+    const err = new Error('保存先フォルダがまだ選ばれていません');
+    err.code = 'missing';
+    throw err;
+  }
+  if (state === 'granted') return handle;
+  const perm = await handle.requestPermission(WRITE_ACCESS);
+  if (perm !== 'granted') {
+    const err = new Error('保存先フォルダが許可されませんでした。ダイアログでは「次回以降も許可」を選んでください');
+    err.code = 'denied';
+    throw err;
+  }
+  cachedBackupDir = handle;
+  return handle;
+}
+
+// 許可済みならダイアログなし。未選択、または force のときだけフォルダ選択を出す（クリック中に呼ぶ）。
+// ハンドルが残っていて許可だけ切れているときは、フォルダを選び直さず requestPermission に進む。
 export async function ensureBackupDir(force = false) {
-  const existing = !force && (cachedBackupDir || await getBackupDir());
-  if (existing) {
-    try {
-      let perm = await existing.queryPermission({ mode: 'readwrite' });
-      if (perm === 'prompt') perm = await existing.requestPermission({ mode: 'readwrite' });
-      if (perm === 'granted') {
-        cachedBackupDir = existing;
-        return existing;
-      }
-    } catch {
-      cachedBackupDir = null;
-    }
+  if (!force) {
+    const { state, handle } = await getBackupAccess();
+    if (handle && state === 'granted') return handle;
+    if (handle) return restoreBackupAccess();
   }
   if (typeof showDirectoryPicker !== 'function') {
     throw new Error('保存先フォルダが未許可です。一覧・設定を開いて許可してください。');
@@ -243,7 +276,20 @@ export async function ensureBackupDir(force = false) {
     mode: 'readwrite',
     startIn: 'downloads'
   });
-  return saveBackupDir(dir);
+  const saved = await saveBackupDir(dir);
+  const { backupPersistHint } = await chrome.storage.local.get('backupPersistHint');
+  if (!backupPersistHint) {
+    await chrome.storage.local.set({ backupPersistHint: true });
+    alert(
+      'フォルダを記憶しました。\n\n' +
+      'Chrome またはこのタブを閉じると、アクセス許可は一度切れます。\n' +
+      'そのあと一覧・設定で「保存先へのアクセスを再開」を押し、\n' +
+      'ダイアログが出たら「次回以降も許可」を選んでください。\n' +
+      '以後は、タブを閉じても Chrome を終了しても再許可は不要です。\n\n' +
+      '「今回のみ」を選ぶと、次に閉じたときまた聞かれます。'
+    );
+  }
+  return saved;
 }
 
 // ISO文字列やミリ秒を「2026/11/17 17:59」の形にする。値が無ければ '-'。

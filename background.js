@@ -336,8 +336,10 @@ async function backupPrint(p) {
   const bytes = await fetchImageBytes(p);
   const dir = await getBackupDir();
   if (!dir) throw new Error('保存先フォルダが未許可のため削除を中止しました。一覧・設定を開いて保存先を許可してください');
+  // サービスワーカーから requestPermission は出せない（ユーザー操作と一覧タブが要る）。
+  // ここは許可の有無だけ見て、切れていれば削除せず一覧での再開を案内する。
   const perm = await dir.queryPermission({ mode: 'readwrite' });
-  if (perm !== 'granted') throw new Error('保存先フォルダの許可が切れています。一覧・設定を開いて再度許可してください');
+  if (perm !== 'granted') throw new Error('保存先フォルダの許可が切れています。一覧・設定で「保存先へのアクセスを再開」を押し、「次回以降も許可」を選んでください');
   const folder = await dir.getDirectoryHandle('VRChatPrints', { create: true });
   const name = backupFilename(p).split('/').pop();
   const file = await folder.getFileHandle(name, { create: true });

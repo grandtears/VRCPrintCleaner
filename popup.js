@@ -1,6 +1,6 @@
 // ツールバーアイコンを押したときに出る小さい窓。
 // 枚数の確認、自動削除のオン/オフ、「今すぐチェック」、一覧ページを開く、だけを行う。
-import { getSettings, saveSettings, getState, formatDate, ensureBackupDir } from './common.js';
+import { getSettings, saveSettings, getState, formatDate, getBackupAccess } from './common.js';
 
 // getElementById の短い別名。このファイル内の要素参照はすべてこれ。
 const $ = (id) => document.getElementById(id);
@@ -56,12 +56,12 @@ $('runNow').addEventListener('click', async () => {
   $('runNow').textContent = 'チェック中…';
   const settings = latestSettings;
   if (settings?.enabled && settings.backupBeforeDelete && !settings.dryRun) {
-    try {
-      await ensureBackupDir();
-    } catch (e) {
+    // ポップアップでは「次回以降も許可」のダイアログが出ない。切れていたら一覧タブへ送る。
+    const access = await getBackupAccess();
+    if (access.state !== 'granted') {
       $('runNow').disabled = false;
       $('runNow').textContent = '今すぐチェック';
-      if (e?.name !== 'AbortError') chrome.runtime.openOptionsPage();
+      chrome.runtime.openOptionsPage();
       return;
     }
   }
