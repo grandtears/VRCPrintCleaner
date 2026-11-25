@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Print Cleaner for VRChat",
   "short_name": "Print Cleaner",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "VRChatのプリントが上限に達したら、保護(★)していない古いものから自動削除します。非公式ツールです。",
   "permissions": ["storage", "alarms", "scripting", "webRequest", "declarativeNetRequestWithHostAccess"],
   "host_permissions": [
