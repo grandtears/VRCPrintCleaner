@@ -83,24 +83,47 @@ document.querySelectorAll('[data-key]').forEach((el) => {
 
 // ---------- プリント一覧 ----------
 // background に一覧取得を頼む。失敗時はグリッドを空にして、ログインへのリンクを出す。
+// 定期更新はボタンを押したときと同じ取得を裏で行い、中身が変わったときだけカードを描き直す。
+let loadingPrints = false;
+let printStamp = '';
+
+function stampPrints(list, uid) {
+  return JSON.stringify([uid, (list || []).map((p) => [
+    p.id, p.worldName, p.authorId, p.authorName, p.note, p.createdAt, p.timestamp, p.files?.image
+  ])]);
+}
+
+function showList(list, uid) {
+  prints = list;
+  userId = uid;
+  printStamp = stampPrints(list, uid);
+  $('listError').hidden = true;
+  renderGrid();
+}
+
 async function loadPrints() {
+  if (loadingPrints) return;
+  loadingPrints = true;
   $('listError').hidden = true;
   $('grid').innerHTML = '<div class="muted">読み込み中…</div>';
-  const res = await chrome.runtime.sendMessage({ type: 'getPrints' });
-  if (!res?.ok) {
-    $('grid').innerHTML = '';
-    $('listError').hidden = false;
-    $('listError').innerHTML = '';
-    $('listError').append(res?.error || '読み込みに失敗しました', ' ');
-    const a = document.createElement('a');
-    a.href = 'https://vrchat.com/home/login';
-    a.target = '_blank';
-    a.textContent = 'vrchat.com を開く';
-    $('listError').append(a);
-    return;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'getPrints' });
+    if (!res?.ok) {
+      $('grid').innerHTML = '';
+      $('listError').hidden = false;
+      $('listError').innerHTML = '';
+      $('listError').append(res?.error || '読み込みに失敗しました', ' ');
+      const a = document.createElement('a');
+      a.href = 'https://vrchat.com/home/login';
+      a.target = '_blank';
+      a.textContent = 'vrchat.com を開く';
+      $('listError').append(a);
+      return;
+    }
+    showList(res.result.prints, res.result.userId);
+  } finally {
+    loadingPrints = false;
   }
-  ({ prints, userId } = res.result);
-  renderGrid();
 }
 
 // 取得済みの prints からカードを組み立てる。設定や保護が変わったときもここだけ呼べばよい。
@@ -261,6 +284,14 @@ $('runNow').addEventListener('click', async () => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.logs) renderLogs();
   if (area === 'sync' && changes.protectedIds) renderGrid();
+  // 定期チェック（と手動の再取得）が控えを書いたら、開いている一覧へ反映する。
+  // 手で読み込み中のときは、その結果表示に任せてここでは触らない。変化がなければ画像を読み直さない。
+  if (area === 'local' && changes.printCache && !loadingPrints) {
+    const cache = changes.printCache.newValue;
+    if (!cache?.prints || !cache.userId) return;
+    if (stampPrints(cache.prints, cache.userId) === printStamp) return;
+    showList(cache.prints, cache.userId);
+  }
 });
 
 loadSettingsForm();

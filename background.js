@@ -3,7 +3,7 @@
 // 認証情報は一切保存しない。vrchat.com にログイン済みのブラウザCookieをそのまま使う。
 import {
   getSettings, getProtectedIds, pruneProtectedIds,
-  getState, setState, addLog, selectDeletions, imageUrlCandidates, isTrustedAssetUrl, printTime,
+  getState, setState, addLog, setPrintCache, selectDeletions, imageUrlCandidates, isTrustedAssetUrl, printTime,
   getBackupDir
 } from './common.js';
 
@@ -419,6 +419,9 @@ async function doRun(reason) {
       summary.count = prints.length - summary.deleted.length;
     }
 
+    // 開いている一覧は、この控えが変わったときに再描画する。チェック間隔がそのまま更新間隔になる。
+    const removed = new Set(summary.deleted);
+    await setPrintCache(userId, prints.filter((p) => !removed.has(p.id)));
     await setState({ lastRunAt: new Date().toISOString(), lastCount: summary.count, lastError: null, userId, transport });
     await updateBadge(summary.count, settings, null);
   } catch (e) {
@@ -474,6 +477,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       const { userId } = await getMe();
       const prints = await getPrints(userId);
       const settings = await getSettings();
+      await setPrintCache(userId, prints);
       await setState({ lastCount: prints.length, lastError: null, userId });
       await updateBadge(prints.length, settings, null);
       return { userId, prints };

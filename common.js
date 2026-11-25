@@ -114,6 +114,31 @@ export async function addLog(level, message) {
   await chrome.storage.local.set({ logs: logs.slice(0, 100) });
 }
 
+// 一覧画面が開いたままでも、定期チェックの結果でカードを描き直すための控え。
+// 画面が使う項目だけ残す。APIの余分なフィールドでストレージを膨らませない。
+function slimPrint(p) {
+  const image = p?.files?.image;
+  return {
+    id: p.id,
+    worldName: p.worldName || '',
+    authorId: p.authorId || '',
+    authorName: p.authorName || '',
+    note: p.note || '',
+    createdAt: p.createdAt || p.timestamp || '',
+    files: image ? { image } : {}
+  };
+}
+
+export async function setPrintCache(userId, prints) {
+  await chrome.storage.local.set({
+    printCache: {
+      at: new Date().toISOString(),
+      userId,
+      prints: (prints || []).filter((p) => p?.id).map(slimPrint)
+    }
+  });
+}
+
 // --- プリントのユーティリティ ---
 
 // プリントの作成時刻をミリ秒で返す。APIのフィールド名が変わっても createdAt / timestamp の両方を見る。
